@@ -1,118 +1,163 @@
+"""Candidates API — Flask service backed by OCI NoSQL Database.
+
+Port of the AWS version, which used boto3 against DynamoDB. Two things changed
+and nothing else did: the storage client, and how it authenticates.
+
+Authentication:
+    OKE workload identity. The signer reads a projected service account token
+    from the pod filesystem and exchanges it for a workload principal, which is
+    the OCI equivalent of IRSA on EKS. There is no key, no config file and no
+    environment credential anywhere in the image.
+
+    It only works if all of the following line up: the cluster is an
+    ENHANCED_CLUSTER, the pod runs as the service account named in the IAM
+    policy, and that policy names the same namespace and cluster OCID. A
+    mismatch in any one of them surfaces as a 404 from NoSQL rather than a
+    permission error, because the caller resolves to no groups at all.
+
+Storage:
+    A NoSQL table with a single shard column, CandidateName, matching the
+    DynamoDB table's partition key. Queries are SQL rather than key conditions.
+"""
+
 import json
 import os
-from flask import Flask, Response, request
-import boto3
-from boto3.dynamodb.conditions import Key
 
-# Fetching the hostname of the current machine (for debugging or health checks)
+from flask import Flask, Response, request
+
+from oci.auth.signers import get_oke_workload_identity_resource_principal_signer
+from oci.nosql import NosqlClient
+from oci.nosql.models import QueryDetails, UpdateRowDetails
+
+# Reported by /gtg?details=true so a caller can tell which pod answered. The
+# AWS version shelled out to `hostname -I`; inside a pod the IP is the useful
+# identifier and it is already in the environment on most images, but the shell
+# call is kept because it works regardless of the base image.
 instance_id = os.popen("hostname -I").read().strip()
 
-# Retrieving the DynamoDB table name from environment variables with a default fallback
-# TC_DYNAMO_TABLE should be set in the environment variables to specify the table name.
-dynamo_table_name = os.environ.get('TC_DYNAMO_TABLE', 'Candidates')
+table_name = os.environ.get("NOSQL_TABLE_NAME", "Candidates")
+compartment_id = os.environ["OCI_COMPARTMENT_ID"]
 
-# Initializing DynamoDB resource and table object using boto3
-# Ensure the AWS credentials and region configuration are properly set up.
-dyndb_client = boto3.resource('dynamodb', region_name='us-east-2')
-dyndb_table = dyndb_client.Table(dynamo_table_name)
+# The signer refreshes its own token, so it is built once at import time and
+# reused for the life of the process.
+_signer = get_oke_workload_identity_resource_principal_signer()
 
-# Initializing Flask application
+# NosqlClient wants a config dict even when a signer supplies the credentials;
+# an empty one is the documented way to say "everything comes from the signer".
+nosql = NosqlClient(config={}, signer=_signer)
+
 candidates_app = Flask(__name__)
 
-# Default route to handle invalid requests
-@candidates_app.route('/', methods=['GET'])
+
+@candidates_app.route("/", methods=["GET"])
 def default():
-    """
-    Default endpoint to return a 200 for nginx
-    """
+    """Return 200 for the ingress controller's default backend check."""
     return Response(status=200)
 
-# Health check endpoint ("go to green")
-@candidates_app.route('/gtg', methods=['GET'])
-def gtg():
-    """
-    Health check endpoint to verify the application's readiness.
-    If the "details" query parameter is provided, it returns connection details.
-    Returns:
-        JSON: Connection status and instance ID if details are requested.
-        Otherwise, an empty 200 response.
-    """
-    details = request.args.get("details")
 
+@candidates_app.route("/gtg", methods=["GET"])
+def gtg():
+    """Report readiness, optionally with the answering pod's address.
+
+    Returns:
+        An empty 200, or a JSON body with the pod address when the request
+        carries a "details" query parameter.
+    """
     if "details" in request.args:
         return Response(
             json.dumps({"connected": "true", "hostname": instance_id}),
             status=200,
-            mimetype="application/json"
+            mimetype="application/json",
         )
-    else:
-        return Response(status=200)
+    return Response(status=200)
 
-# Retrieve a candidate by name
-@candidates_app.route('/candidate/<name>', methods=['GET'])
+
+@candidates_app.route("/candidate/<name>", methods=["GET"])
 def get_candidate(name):
-    """
-    Retrieves information about a specific candidate from DynamoDB.
+    """Look up one candidate by name.
+
     Args:
-        name (str): The name of the candidate to retrieve.
+        name: Value of the CandidateName shard column.
+
     Returns:
-        JSON: Candidate details if found, or a 404 error if not found.
+        A JSON array of matching rows, or 404 when the name is not present.
     """
     try:
-        response = dyndb_table.query(
-            KeyConditionExpression=Key('CandidateName').eq(name)
+        # Bound variable, not string interpolation — the value arrives
+        # straight off the URL path and reaches the query engine as data.
+        details = QueryDetails(
+            compartment_id=compartment_id,
+            statement=(
+                f"DECLARE $name STRING; "
+                f"SELECT * FROM {table_name} WHERE CandidateName = $name"
+            ),
+            variables={"$name": name},
         )
+        rows = nosql.query(query_details=details).data.items
 
-        if len(response['Items']) == 0:
-            raise Exception  # Raise an exception if no items are found
+        if not rows:
+            return "Not Found", 404
 
         return Response(
-            json.dumps(response['Items']),
+            json.dumps(rows),
             status=200,
-            mimetype="application/json"
+            mimetype="application/json",
         )
-    except:
+    except Exception:
         return "Not Found", 404
 
-# Add or update a candidate
-@candidates_app.route('/candidate/<name>', methods=['POST'])
+
+@candidates_app.route("/candidate/<name>", methods=["POST"])
 def post_candidate(name):
-    """
-    Adds or updates a candidate record in DynamoDB.
+    """Insert or replace a candidate row.
+
     Args:
-        name (str): The name of the candidate to add or update.
+        name: Value of the CandidateName shard column.
+
     Returns:
-        JSON: Confirmation message with candidate name if successful, or an error if failed.
+        JSON echoing the stored name, or 500 if the write failed.
     """
     try:
-        dyndb_table.put_item(Item={"CandidateName": name})
-    except Exception as ex:
+        nosql.update_row(
+            table_name_or_id=table_name,
+            update_row_details=UpdateRowDetails(
+                compartment_id=compartment_id,
+                value={"CandidateName": name},
+            ),
+        )
+    except Exception:
         return "Unable to update", 500
 
     return Response(
         json.dumps({"CandidateName": name}),
         status=200,
-        mimetype="application/json"
+        mimetype="application/json",
     )
 
-# Retrieve all candidates
-@candidates_app.route('/candidates', methods=['GET'])
+
+@candidates_app.route("/candidates", methods=["GET"])
 def get_candidates():
-    """
-    Retrieves a list of all candidates from DynamoDB.
+    """List every candidate.
+
     Returns:
-        JSON: List of candidates if found, or a 404 error if none are found.
+        A JSON array of all rows, or 404 when the table is empty. The empty
+        case returning 404 rather than an empty array is carried over from the
+        AWS version so the test script behaves identically.
     """
     try:
-        items = dyndb_table.scan()['Items']
+        details = QueryDetails(
+            compartment_id=compartment_id,
+            statement=f"SELECT * FROM {table_name}",
+        )
+        rows = nosql.query(query_details=details).data.items
 
-        if len(items) == 0:
-            raise Exception  # Raise an exception if no items are found
+        if not rows:
+            return "Not Found", 404
 
         return Response(
-            json.dumps(items),
+            json.dumps(rows),
             status=200,
-            mimetype="application/json"
+            mimetype="application/json",
         )
-    except:
+    except Exception:
         return "Not Found", 404

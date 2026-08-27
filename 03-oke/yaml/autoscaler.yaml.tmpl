@@ -1,0 +1,48 @@
+# ==============================================================================
+# autoscaler.yaml.tmpl — cluster autoscaler values for OKE
+# ------------------------------------------------------------------------------
+# NODE POOLS ARE NAMED, NOT DISCOVERED. On AWS the autoscaler found its scaling
+# targets by reading EC2 tags, so adding a node group was enough to enrol it.
+# The OCI provider has no tag discovery at all: each pool is passed explicitly
+# as min:max:ocid, and a pool that is not listed is invisible to the autoscaler.
+#
+# Only the flask pool appears below. The game pool is left out on purpose so
+# nothing ever scales it.
+# ==============================================================================
+
+cloudProvider: oci
+
+# The pool the autoscaler is allowed to resize, and the bounds it must stay
+# within. These are the same numbers the AWS scaling_config carried.
+autoscalingGroups:
+  - name: ${node_pool_id}
+    minSize: 1
+    maxSize: 4
+
+extraEnv:
+  # Authenticate as the worker node instance rather than with a config file.
+  # The dynamic group and policy in iam.tf are what make this work.
+  OCI_USE_INSTANCE_PRINCIPAL: "true"
+  OCI_REGION: ${region}
+
+rbac:
+  create: true
+  serviceAccount:
+    # The chart creates its own. The AWS build had to pre-create one so an IRSA
+    # role annotation could be attached; instance principals need no annotation.
+    create: true
+    name: cluster-autoscaler
+
+extraArgs:
+  balance-similar-node-groups: "true"
+  skip-nodes-with-system-pods: "false"
+  expander: least-waste
+
+  # Scale-down tuning — same values as the AWS build, kept short so the
+  # behaviour is visible during a demo rather than ten minutes later.
+  scale-down-enabled: "true"
+  scale-down-unneeded-time: "1m"
+  scale-down-delay-after-delete: "1m"
+  scale-down-delay-after-failure: "1m"
+  scale-down-utilization-threshold: "0.5"
+  scale-down-delay-after-add: "1m"

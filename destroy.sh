@@ -1,104 +1,100 @@
 #!/bin/bash
+# ==============================================================================
+# destroy.sh — Full teardown
+# ------------------------------------------------------------------------------
+# ORDER MATTERS, AND FOR A DIFFERENT REASON THAN ON AWS.
+#
+# The AWS script deleted orphaned "k8s*" security groups after the fact,
+# because the ALB controller created them outside Terraform and EKS left them
+# behind. Nothing here creates security groups out of band, so that step is
+# gone. What replaces it is a real ordering constraint: the OCI load balancer
+# is created by the in-cluster cloud controller manager, not by Terraform, so
+# Terraform does not know it exists. Destroying the cluster first strands the
+# load balancer, which then blocks the subnet — and therefore the VCN — from
+# being deleted, with an error that names the subnet rather than the balancer.
+#
+# Removing the ingress release first lets the controller delete its own load
+# balancer while it is still running to do so.
+# ==============================================================================
 
-export AWS_DEFAULT_REGION=us-east-2 
+# NOT strict mode. -e is deliberately omitted: teardown has to keep going
+# past resources that are already gone, and a partial destroy that stops at
+# the first missing object leaves more behind than it removes. Every step
+# that genuinely must succeed checks its own exit status.
+set -uo pipefail
 
-# ========================================
-# Full Cleanup Script
-# Tears down EKS infrastructure, Kubernetes
-# deployments, ECR repositories, and 
-# supporting Terraform state and security groups.
-# ========================================
+REGION="${OCI_REGION:-us-chicago-1}"
 
-# ----------------------------------------
-# Step 1: Delete Kubernetes Deployments
-# Suppress output for stress.yaml and games.yaml
-# flask-app.yaml may not exist; log a warning if delete fails
-# ----------------------------------------
-kubectl delete -f stress.yaml > /dev/null 2> /dev/null
-kubectl delete -f games.yaml 
-kubectl delete -f flask-app.yaml || {
-    echo "WARNING: Failed to delete Kubernetes deployment. It may not exist."
+# ------------------------------------------------------------------------------
+# Step 1 — Remove the workloads
+# ------------------------------------------------------------------------------
+kubectl delete -f stress.yaml     >/dev/null 2>&1
+kubectl delete -f games.yaml      >/dev/null 2>&1
+kubectl delete -f flask-app.yaml  >/dev/null 2>&1 || {
+  echo "WARNING: Failed to delete the Flask deployment. It may not exist."
 }
 
-# ----------------------------------------
-# Step 2: Tear Down EKS Terraform Infrastructure
-# ----------------------------------------
-cd "03-eks" || { echo "ERROR: Failed to change directory to 03-eks. Exiting."; exit 1; }
-echo "NOTE: Destroying EKS cluster."
+# ------------------------------------------------------------------------------
+# Step 2 — Release the load balancer before the cluster goes away
+# ------------------------------------------------------------------------------
+cd 03-oke || { echo "ERROR: Failed to change directory to 03-oke."; exit 1; }
 
-# Initialize Terraform if not already initialized
 if [ ! -d ".terraform" ]; then
-    terraform init
+  terraform init
 fi
 
-# Perform Terraform destroy to tear down the EKS cluster
-echo "NOTE: Deleting nginx_ingress."
-terraform destroy -target=helm_release.nginx_ingress  -auto-approve > /dev/null 2> /dev/null
-terraform destroy -auto-approve || { echo "ERROR: Terraform destroy failed. Exiting."; exit 1; }
+echo "NOTE: Removing the ingress controller so its load balancer is released."
+terraform destroy -target=helm_release.nginx_ingress -auto-approve >/dev/null 2>&1
 
-# Clean up local Terraform state and module cache
-rm -rf terraform* .terraform*
-
-cd ..  # Return to root directory
-
-# ----------------------------------------
-# Step 3: Delete Orphaned Security Groups Named "k8s*"
-# AWS sometimes leaves dangling security groups after EKS deletion
-# ----------------------------------------
-
-# Query AWS for security group IDs where the group name starts with "k8s"
-group_ids=$(aws ec2 describe-security-groups \
-  --query "SecurityGroups[?starts_with(GroupName, 'k8s')].GroupId" \
-  --output text)
-
-# If no matching groups found, skip deletion logic
-if [ -z "$group_ids" ]; then
-  echo "NOTE: No security groups starting with 'k8s' found."
-fi
-
-# Loop through each security group ID and attempt deletion
-for group_id in $group_ids; do
-  echo "NOTE: Deleting security group: $group_id"
-  aws ec2 delete-security-group --group-id "$group_id"
-
-  # Check if deletion was successful and log accordingly
-  if [ $? -eq 0 ]; then
-    echo "NOTE: Successfully deleted $group_id"
-  else
-    echo "WARNING: Failed to delete $group_id — possibly still in use by another resource"
+# The delete is asynchronous — the Service goes away before the balancer does.
+echo "NOTE: Waiting for the load balancer to be deleted."
+for _ in $(seq 1 30); do
+  REMAINING=$(oci lb load-balancer list \
+    --compartment-id "${OCI_COMPARTMENT_ID:-$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' ~/.oci/config)}" \
+    --region "${REGION}" \
+    --query 'length(data[?"lifecycle-state"==`ACTIVE`])' --raw-output 2>/dev/null || echo 0)
+  if [ "${REMAINING}" = "0" ]; then
+    break
   fi
+  sleep 10
 done
 
-# ----------------------------------------
-# Step 4: Delete ECR Repositories and All Tagged Images
-# This removes container image repositories completely
-# ----------------------------------------
-echo "NOTE: Deleting ECR repository contents."
-
-# Delete Flask app ECR repository with force to also delete all images
-ECR_REPOSITORY_NAME="flask-app"
-aws ecr delete-repository --repository-name "$ECR_REPOSITORY_NAME" --force || {
-    echo "WARNING: Failed to delete ECR repository. It may not exist."
+# ------------------------------------------------------------------------------
+# Step 3 — Destroy the cluster phase
+# ------------------------------------------------------------------------------
+echo "NOTE: Destroying the OKE cluster."
+terraform destroy -auto-approve || {
+  echo "ERROR: Terraform destroy failed for 03-oke."
+  exit 1
 }
 
-# Delete games repository as well (tetris, breakout, frogger, etc.)
-aws ecr delete-repository --repository-name "games" --force || {
-    echo "WARNING: Failed to delete ECR repository. It may not exist."
-}
-
-# ----------------------------------------
-# Step 5: Tear Down ECR Terraform Infrastructure
-# ----------------------------------------
-cd "01-ecr" || { echo "ERROR: Failed to change directory to 01-ecr. Exiting."; exit 1; }
-
-# Destroy ECR Terraform resources (repositories, policies)
-terraform destroy -auto-approve || { echo "ERROR: Terraform destroy failed. Exiting."; exit 1; }
-
-# Clean up local Terraform state and modules
-rm -rf terraform* .terraform*
+rm -rf terraform.tfstate* .terraform*
 cd ..
 
-# ----------------------------------------
-# Step 6: All Cleanup Done
-# ----------------------------------------
-echo "NOTE: Cleanup process completed successfully."
+# ------------------------------------------------------------------------------
+# Step 4 — Destroy the network and registry phase
+# ------------------------------------------------------------------------------
+# OCIR repositories delete with their images, so there is no equivalent of the
+# AWS build's separate `ecr delete-repository --force` pass.
+# ------------------------------------------------------------------------------
+cd 01-ocir || { echo "ERROR: Failed to change directory to 01-ocir."; exit 1; }
+
+if [ ! -d ".terraform" ]; then
+  terraform init
+fi
+
+echo "NOTE: Destroying the VCN and OCIR repositories."
+terraform destroy -auto-approve || {
+  echo "ERROR: Terraform destroy failed for 01-ocir."
+  exit 1
+}
+
+rm -rf terraform.tfstate* .terraform*
+cd ..
+
+# ------------------------------------------------------------------------------
+# Step 5 — Local cleanup
+# ------------------------------------------------------------------------------
+rm -f flask-app.yaml games.yaml
+
+echo "NOTE: Cleanup completed successfully."

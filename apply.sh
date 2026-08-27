@@ -1,152 +1,194 @@
 #!/bin/bash
+# ==============================================================================
+# apply.sh — Full pipeline deployment
+# ------------------------------------------------------------------------------
+# Phase 1 (01-ocir):  VCN, subnets, gateways and the OCIR repositories
+# Phase 2 (02-docker): Builds four images and pushes them to OCIR
+# Phase 3 (03-oke):   OKE cluster, node pools, NoSQL, IAM and the add-ons
+# Phase 4:            Renders the manifests and applies them with kubectl
+#
+# No environment variables are required. Everything is derived from
+# ~/.oci/config. An OCIR auth token is created on the first run and cached in
+# ~/.oci/ocir_token for reuse.
+#
+# Optional:
+#   OCI_COMPARTMENT_ID  Defaults to the tenancy root when unset
+#   OCI_REGION          Defaults to us-chicago-1
+# ==============================================================================
 
-export AWS_DEFAULT_REGION=us-east-2 
+set -euo pipefail
 
-# ========================================
-# Full Pipeline Deployment Script
-# Deploys ECR, builds Docker containers,
-# pushes to ECR, provisions EKS, deploys
-# containers to EKS, and validates.
-# ========================================
-
-# Run an environment check script to ensure all required tools and variables are set
+# ------------------------------------------------------------------------------
+# Environment validation
+# ------------------------------------------------------------------------------
+echo "NOTE: Running environment validation."
 ./check_env.sh
-if [ $? -ne 0 ]; then
-  echo "ERROR: Environment check failed. Exiting."
-  exit 1
+
+# ------------------------------------------------------------------------------
+# Derive OCI identifiers
+# ------------------------------------------------------------------------------
+TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+USER_OCID=$(awk -F'=' '/^user[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+
+REGION="${OCI_REGION:-us-chicago-1}"
+COMPARTMENT_ID="${OCI_COMPARTMENT_ID:-$TENANCY_OCID}"
+
+HOME_REGION=$(oci iam region-subscription list \
+  --query "data[?\"is-home-region\"].\"region-name\" | [0]" --raw-output)
+NAMESPACE=$(oci os ns get --query 'data' --raw-output)
+
+# OCIR login is namespace/username, not an OCID. Federated users come back as
+# "oracleidentitycloudservice/email@domain", which is exactly what OCIR wants.
+USER_NAME=$(oci iam user get --user-id "${USER_OCID}" --query 'data.name' --raw-output)
+OCIR_USERNAME="${NAMESPACE}/${USER_NAME}"
+OCIR_HOST="${REGION}.ocir.io"
+IMAGE_VERSION="rc1"
+
+echo "NOTE: Region      - ${REGION}"
+echo "NOTE: Home region - ${HOME_REGION}"
+echo "NOTE: Namespace   - ${NAMESPACE}"
+echo "NOTE: Compartment - ${COMPARTMENT_ID}"
+
+export TF_VAR_region="${REGION}"
+export TF_VAR_home_region="${HOME_REGION}"
+export TF_VAR_tenancy_ocid="${TENANCY_OCID}"
+export TF_VAR_compartment_ocid="${COMPARTMENT_ID}"
+
+# ------------------------------------------------------------------------------
+# OCIR auth token — created once, cached in ~/.oci/ocir_token
+# ------------------------------------------------------------------------------
+# An auth token is readable only at creation time, so it is cached on first
+# use. Delete the file to force a new one; OCI allows two per user, so an old
+# token may need removing in the Console first.
+# ------------------------------------------------------------------------------
+TOKEN_FILE="${HOME}/.oci/ocir_token"
+
+if [ -f "${TOKEN_FILE}" ] && [ -s "${TOKEN_FILE}" ]; then
+  echo "NOTE: Using cached OCIR token."
+  OCIR_TOKEN=$(cat "${TOKEN_FILE}")
+else
+  echo "NOTE: Creating an OCIR auth token."
+  OCIR_TOKEN=$(oci iam auth-token create \
+    --user-id "${USER_OCID}" \
+    --description "oci-k8s-ocir" \
+    --query 'data.token' --raw-output)
+  echo "${OCIR_TOKEN}" > "${TOKEN_FILE}"
+  chmod 600 "${TOKEN_FILE}"
 fi
 
-# ----------------------------------------
-# Function to initialize Terraform if needed
-# Checks for .terraform dir to avoid re-init
-# ----------------------------------------
+# ------------------------------------------------------------------------------
+# Terraform init helper
+# ------------------------------------------------------------------------------
 init_terraform() {
-    if [ ! -d ".terraform" ]; then
-        terraform init
-    fi
+  if [ ! -d ".terraform" ]; then
+    terraform init
+  fi
 }
 
-# ----------------------------------------
-# Step 1: Build ECR Repositories with Terraform
-# ----------------------------------------
-cd "01-ecr" || { echo "ERROR: Failed to change directory to 01-ecr"; exit 1; }
-echo "NOTE: Building ECR Instance."
-init_terraform                          # Ensure Terraform is initialized
-terraform apply -auto-approve           # Apply ECR infrastructure without prompt
-cd ..                                   # Return to root
-
-# ----------------------------------------
-# Step 2: Build & Push Docker Images
-# ----------------------------------------
-cd "02-docker" || { echo "ERROR: Failed to change directory to 02-docker"; exit 1; }
-echo "NOTE: Building Flask container with Docker."
-
-# Get AWS Account ID dynamically to reference the correct ECR repo
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
-if [ -z "$AWS_ACCOUNT_ID" ]; then
-    echo "ERROR: Failed to retrieve AWS Account ID. Exiting."
-    exit 1
-fi
-
-# Authenticate Docker to AWS ECR using get-login-password and piping to login command
-aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com || {
-    echo "ERROR: Docker authentication to ECR failed. Exiting."
-    exit 1
-}
-
-# ----------- Build Flask App ------------
-IMAGE_TAG="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/flask-app:flask-app-rc1"
-cd flask-app
-docker build -t $IMAGE_TAG . || { echo "ERROR: Docker build failed. Exiting."; exit 1; }
-docker push $IMAGE_TAG || { echo "ERROR: Docker push failed. Exiting."; exit 1; }
-cd ..
-
-# ----------- Build Tetris Game ----------
-IMAGE_TAG="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/games:tetris-rc1"
-cd tetris
-docker build -t $IMAGE_TAG . || { echo "ERROR: Docker build failed. Exiting."; exit 1; }
-docker push $IMAGE_TAG || { echo "ERROR: Docker push failed. Exiting."; exit 1; }
-cd ..
-
-# ----------- Build Breakout Game --------
-IMAGE_TAG="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/games:breakout-rc1"
-cd breakout
-docker build -t $IMAGE_TAG . || { echo "ERROR: Docker build failed. Exiting."; exit 1; }
-docker push $IMAGE_TAG || { echo "ERROR: Docker push failed. Exiting."; exit 1; }
-cd ..
-
-# ----------- Build Frogger Game ---------
-IMAGE_TAG="${AWS_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/games:frogger-rc1"
-cd frogger
-docker build -t $IMAGE_TAG . || { echo "ERROR: Docker build failed. Exiting."; exit 1; }
-docker push $IMAGE_TAG || { echo "ERROR: Docker push failed. Exiting."; exit 1; }
-cd ..
-
-cd ..  # Return to root directory
-
-# ----------------------------------------
-# Step 3: Provision EKS Cluster via Terraform
-# ----------------------------------------
-cd "03-eks" || { echo "ERROR: Failed to change directory to 03-eks"; exit 1; }
-echo "NOTE: Building EKS instance."
+# ==============================================================================
+# Phase 1 — Network and OCIR repositories
+# ==============================================================================
+cd 01-ocir
+echo "NOTE: Building the VCN and OCIR repositories."
 init_terraform
 terraform apply -auto-approve
 
-# ----------------------------------------
-# Step 4: Prepare Kubernetes YAML Manifests
-# Replace placeholder ${account_id} with real AWS Account ID
-# ----------------------------------------
+API_SUBNET=$(terraform output -raw api_subnet_ocid)
+LB_SUBNET=$(terraform output -raw lb_subnet_ocid)
+NODE_SUBNET=$(terraform output -raw node_subnet_ocid)
+cd ..
 
-# Replace placeholder in flask-app.yaml template with real AWS account ID
-sed "s/\${account_id}/$AWS_ACCOUNT_ID/g" yaml/flask-app.yaml.tmpl > ../flask-app.yaml || {
-    echo "ERROR: Failed to generate Kubernetes deployment file. Exiting."
-    exit 1
+# ==============================================================================
+# Phase 2 — Build and push container images
+# ==============================================================================
+# OCIR repositories are created empty by Terraform but a push still has to
+# name the full path. Unlike ECR there is no per-registry login command: the
+# auth token is the password for a plain `docker login`.
+# ==============================================================================
+cd 02-docker
+echo "NOTE: Logging in to OCIR at ${OCIR_HOST}."
+echo "${OCIR_TOKEN}" | docker login "${OCIR_HOST}" \
+  --username "${OCIR_USERNAME}" --password-stdin
+
+build_and_push() {
+  local dir="$1" repo="$2" tag="$3"
+  local image="${OCIR_HOST}/${NAMESPACE}/${repo}:${tag}"
+
+  echo "NOTE: Building ${image}"
+  docker build -t "${image}" "${dir}"
+  docker push "${image}"
 }
 
-# Replace placeholder in games.yaml template with real AWS account ID
-sed "s/\${account_id}/$AWS_ACCOUNT_ID/g" yaml/games.yaml.tmpl > ../games.yaml || {
-    echo "ERROR: Failed to generate Kubernetes deployment file. Exiting."
-    exit 1
+build_and_push flask-app flask-app "flask-app-${IMAGE_VERSION}"
+build_and_push tetris   games     "tetris-${IMAGE_VERSION}"
+build_and_push breakout games     "breakout-${IMAGE_VERSION}"
+build_and_push frogger  games     "frogger-${IMAGE_VERSION}"
+cd ..
+
+# ==============================================================================
+# Phase 3 — OKE cluster
+# ==============================================================================
+cd 03-oke
+echo "NOTE: Building the OKE cluster. This takes roughly 15 minutes."
+
+export TF_VAR_api_subnet_ocid="${API_SUBNET}"
+export TF_VAR_lb_subnet_ocid="${LB_SUBNET}"
+export TF_VAR_node_subnet_ocid="${NODE_SUBNET}"
+export TF_VAR_ocir_namespace="${NAMESPACE}"
+export TF_VAR_ocir_username="${OCIR_USERNAME}"
+export TF_VAR_ocir_token="${OCIR_TOKEN}"
+export TF_VAR_image_version="${IMAGE_VERSION}"
+
+init_terraform
+terraform apply -auto-approve
+
+CLUSTER_OCID=$(terraform output -raw cluster_ocid)
+NOSQL_TABLE=$(terraform output -raw nosql_table_name)
+
+# ------------------------------------------------------------------------------
+# Render the Kubernetes manifests
+# ------------------------------------------------------------------------------
+# The AWS build substituted a single placeholder, the account ID, with one sed
+# expression. OCI image paths need the registry host and the namespace, and the
+# Flask pod additionally needs its table, compartment and region, so the same
+# idea is just carried across more placeholders.
+# ------------------------------------------------------------------------------
+render() {
+  sed -e "s|\${ocir_host}|${OCIR_HOST}|g" \
+      -e "s|\${namespace}|${NAMESPACE}|g" \
+      -e "s|\${image_version}|${IMAGE_VERSION}|g" \
+      -e "s|\${nosql_table}|${NOSQL_TABLE}|g" \
+      -e "s|\${compartment_id}|${COMPARTMENT_ID}|g" \
+      -e "s|\${region}|${REGION}|g" \
+      "$1" > "$2"
 }
 
-cd ..  # Return to root
+render yaml/flask-app.yaml.tmpl ../flask-app.yaml
+render yaml/games.yaml.tmpl     ../games.yaml
+cd ..
 
-# ----------------------------------------
-# Step 5: Configure kubectl to talk to the EKS cluster
-# Updates kubeconfig so kubectl can issue commands to EKS
-# ----------------------------------------
-aws eks update-kubeconfig --name flask-eks-cluster --region us-east-2 || {
-    echo "ERROR: Failed to update kubeconfig for EKS. Exiting."
-    exit 1
-}
+# ==============================================================================
+# Phase 4 — Deploy to the cluster
+# ==============================================================================
+# `oci ce cluster create-kubeconfig` is the counterpart to
+# `aws eks update-kubeconfig`, with one difference that matters: it addresses
+# the cluster by OCID rather than by name, which is why phase 3 outputs it.
+# ==============================================================================
+echo "NOTE: Configuring kubectl for the cluster."
+oci ce cluster create-kubeconfig \
+  --cluster-id "${CLUSTER_OCID}" \
+  --region "${REGION}" \
+  --token-version 2.0.0 \
+  --kube-endpoint PUBLIC_ENDPOINT
 
-# ----------------------------------------
-# Step 6: Deploy Flask App to EKS Cluster
-# ----------------------------------------
-kubectl apply -f flask-app.yaml || {
-    echo "ERROR: Failed to deploy to EKS. Exiting."
-    exit 1
-}
+echo "NOTE: Deploying the Flask application."
+kubectl apply -f flask-app.yaml
 
-# ----------------------------------------
-# Step 7: Deploy Game Containers to EKS Cluster
-# Includes tetris, breakout, and frogger
-# ----------------------------------------
-kubectl apply -f games.yaml || {
-    echo "ERROR: Failed to deploy to EKS. Exiting."
-    exit 1
-}
+echo "NOTE: Deploying the game containers."
+kubectl apply -f games.yaml
 
 echo ""
-echo "NOTE: Validating Solutions"
-
-# ----------------------------------------
-# Step 8: Run Final Validation Script
-# Verifies if services are running correctly
-# ----------------------------------------
-./validate.sh || {
-    echo "ERROR: Validation failed. Exiting."
-    exit 1
-}
+echo "NOTE: Validating the deployment."
+./validate.sh
 
 echo "NOTE: Deployment completed successfully."

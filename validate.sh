@@ -1,90 +1,97 @@
 #!/bin/bash
+# ==============================================================================
+# validate.sh — Post-deploy verification
+# ------------------------------------------------------------------------------
+# Confirms the cluster exists, waits for the load balancer to be assigned and
+# for the application to answer, then runs the functional test.
+#
+# ONE PORTING TRAP LIVES HERE. The AWS version read the ingress address from
+#
+#   .status.loadBalancer.ingress[0].hostname
+#
+# because an ALB is published as a DNS name. An OCI load balancer is published
+# as an IP ADDRESS, so that field is empty forever and the original loop would
+# wait indefinitely without ever saying why. The field below is .ip.
+# ==============================================================================
 
-export AWS_DEFAULT_REGION=us-east-2 
+set -euo pipefail
 
-# ========================================
-# EKS Solution Test Script
-# - Verifies if the EKS cluster exists
-# - Waits for Ingress ALB hostname
-# - Waits for /gtg endpoint to return 200
-# - Executes application test against service
-# ========================================
+REGION="${OCI_REGION:-us-chicago-1}"
+CLUSTER_NAME="flask-oke-cluster"
 
-# ----------------------------------------
-# Step 1: Check if EKS Cluster Exists
-# Uses AWS CLI to describe the cluster
-# If it fails, cluster is missing — abort
-# ----------------------------------------
-if aws eks describe-cluster --name flask-eks-cluster > /dev/null 2>&1; then
-  echo "NOTE: Testing the EKS Solution."
-else
-  echo "ERROR: EKS Cluster does not exist."
-  exit 1 
+# ------------------------------------------------------------------------------
+# Step 1 — Confirm the cluster exists and is ACTIVE
+# ------------------------------------------------------------------------------
+TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+COMPARTMENT_ID="${OCI_COMPARTMENT_ID:-$TENANCY_OCID}"
+
+CLUSTER_STATE=$(oci ce cluster list \
+  --compartment-id "${COMPARTMENT_ID}" \
+  --name "${CLUSTER_NAME}" \
+  --region "${REGION}" \
+  --query "data[?\"lifecycle-state\"=='ACTIVE'] | [0].\"lifecycle-state\"" \
+  --raw-output 2>/dev/null || true)
+
+if [ "${CLUSTER_STATE}" != "ACTIVE" ]; then
+  echo "ERROR: OKE cluster ${CLUSTER_NAME} is not ACTIVE."
+  exit 1
 fi
+echo "NOTE: Testing the OKE solution."
 
-# ----------------------------------------
-# Step 2: Define Function to Get ALB Hostname
-# Extracts DNS hostname from Kubernetes Ingress status
-# Assumes ingress object is named 'flask-app-ingress'
-# Returns empty if not yet assigned
-# ----------------------------------------
-get_alb_name() {
-  kubectl get ingress flask-app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null
+# ------------------------------------------------------------------------------
+# Step 2 — Wait for the load balancer address
+# ------------------------------------------------------------------------------
+# An OCI load balancer takes a few minutes to provision after the ingress
+# controller's Service is created, so this polls rather than assuming.
+# ------------------------------------------------------------------------------
+get_lb_ip() {
+  kubectl get ingress flask-app-ingress \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null
 }
 
-# ----------------------------------------
-# Step 3: Wait Until Ingress ALB Is Ready
-# Polls Kubernetes Ingress object every 30 seconds
-# Continues looping until ALB hostname is available
-# ----------------------------------------
 while true; do
-  ALB_NAME=$(get_alb_name)
-
-  if [ -n "$ALB_NAME" ]; then
-    # Hostname found — break out of loop
+  LB_IP=$(get_lb_ip)
+  if [ -n "${LB_IP}" ]; then
     break
   fi
-
-  echo "WARNING: Ingress not ready yet. Waiting 30 seconds..."
+  echo "WARNING: Ingress not ready yet. Waiting 30 seconds."
   sleep 30
 done
 
-# ----------------------------------------
-# Step 4: Wait for Application Readiness
-# Loops until HTTP 200 is returned from ALB on /gtg
-# Confirms app is healthy and responding
-# ----------------------------------------
+echo "NOTE: Load balancer address is ${LB_IP}"
+
+# ------------------------------------------------------------------------------
+# Step 3 — Wait for the application to answer
+# ------------------------------------------------------------------------------
 while true; do
-  HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB_NAME/flask-app/api/gtg")
-  
-  if [ "$HTTP_STATUS" -eq 200 ]; then
-    # App responded successfully — break out of loop
+  HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    "http://${LB_IP}/flask-app/api/gtg")
+
+  if [ "${HTTP_STATUS}" = "200" ]; then
     break
   fi
 
-  echo "WARNING: Waiting... ALB not ready yet. Retrying in 30 seconds..."
+  echo "WARNING: Application not ready yet (HTTP ${HTTP_STATUS}). Retrying in 30 seconds."
   sleep 30
 done
 
-# ----------------------------------------
-# Step 5: Navigate to Docker Directory for Testing
-# Contains test script for verifying app functionality
-# ----------------------------------------
-cd "02-docker" || { echo "ERROR: Failed to change directory to 02-docker"; exit 1; }
+# ------------------------------------------------------------------------------
+# Step 4 — Functional test
+# ------------------------------------------------------------------------------
+cd 02-docker || { echo "ERROR: Failed to change directory to 02-docker"; exit 1; }
 
-# ----------------------------------------
-# Step 6: Define Base Service URL
-# Used as input to the test script
-# Includes path prefix used in Ingress routing
-# ----------------------------------------
-SERVICE_URL="http://$ALB_NAME/flask-app/api"
-echo "NOTE: URL for EKS Solution is $SERVICE_URL/gtg?details=true"
+SERVICE_URL="http://${LB_IP}/flask-app/api"
 
-# ----------------------------------------
-# Step 7: Run Functional Test
-# Calls test_candidates.py with the service URL
-# Fails and exits if test script returns non-zero
-# ----------------------------------------
-./test_candidates.py "$SERVICE_URL" || { echo "ERROR: Application test failed. Exiting."; exit 1; }
+echo ""
+echo "NOTE: Flask API   - ${SERVICE_URL}/gtg?details=true"
+echo "NOTE: Tetris      - http://${LB_IP}/games/tetris/"
+echo "NOTE: Breakout    - http://${LB_IP}/games/breakout/"
+echo "NOTE: Frogger     - http://${LB_IP}/games/frogger/"
+echo ""
 
-cd ..  # Return to root after testing
+./test_candidates.py "${SERVICE_URL}" || {
+  echo "ERROR: Application test failed."
+  exit 1
+}
+
+cd ..

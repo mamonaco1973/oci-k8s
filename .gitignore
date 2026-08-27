@@ -6,4 +6,5 @@
 *.tf.template
 flask-app.yaml
 games.yaml
-
+__pycache__/
+*.pyc

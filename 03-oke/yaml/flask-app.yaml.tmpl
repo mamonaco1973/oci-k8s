@@ -19,18 +19,32 @@ spec:
         app: flask-app                # Label applied to each Pod for selection by Service and HPA
 
     spec:
-      serviceAccountName: dynamodb-access-sa  # Use a specific service account for IAM access to DynamoDB
+      serviceAccountName: nosql-access-sa     # Workload identity — see 03-oke/iam.tf
+
+      imagePullSecrets:
+        - name: ocir-secret                   # OCIR needs a login even inside the tenancy
 
       nodeSelector:
         nodegroup: flask-nodes                  # <-- Only schedule on nodes with this label
 
       containers:
         - name: flask-app                       # Container name within the Pod
-          image: ${account_id}.dkr.ecr.us-east-2.amazonaws.com/flask-app:flask-app-rc1
-                                                # Pull the image from Amazon ECR using a release candidate tag
+          image: ${ocir_host}/${namespace}/flask-app:flask-app-${image_version}
+                                                # Pulled from OCIR
 
           ports:
             - containerPort: 8000               # Expose port 8000 (Flask app default)
+
+          env:
+            # The AWS build hardcoded region into boto3 and defaulted the table
+            # name in code. The OCI SDK needs the compartment on every NoSQL
+            # call, so both are injected rather than guessed.
+            - name: NOSQL_TABLE_NAME
+              value: "${nosql_table}"
+            - name: OCI_COMPARTMENT_ID
+              value: "${compartment_id}"
+            - name: OCI_REGION
+              value: "${region}"
 
           livenessProbe:
             httpGet:

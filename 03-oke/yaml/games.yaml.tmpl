@@ -1,13 +1,9 @@
 # ========================================================
-# Create games namespace
+# The games namespace itself is created by Terraform in
+# 03-oke/k8s.tf, because the OCIR pull secret has to live
+# inside it and Terraform must create the secret.
 # ========================================================
 
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: games
-
----
 # ========================================================
 # Tetris Deployment
 # Manages the pod lifecycle for the game application
@@ -29,9 +25,11 @@ spec:
     spec:
       nodeSelector:  # Constrains pods to nodes with this label
         nodegroup: game-nodes
+      imagePullSecrets:  # OCIR needs a login even inside the tenancy
+        - name: ocir-secret
       containers:
         - name: tetris  # Container name (visible in logs/dashboard)
-          image: ${account_id}.dkr.ecr.us-east-2.amazonaws.com/games:tetris-rc1  # ECR image location
+          image: ${ocir_host}/${namespace}/games:tetris-${image_version}  # OCIR image location
           ports:
             - containerPort: 8000  # The port the game server listens on
 
@@ -108,9 +106,11 @@ spec:
     spec:
       nodeSelector:  # Constrains pods to nodes with this label
         nodegroup: game-nodes
+      imagePullSecrets:  # OCIR needs a login even inside the tenancy
+        - name: ocir-secret
       containers:
         - name: frogger  # Container name (visible in logs/dashboard)
-          image: ${account_id}.dkr.ecr.us-east-2.amazonaws.com/games:frogger-rc1  # ECR image location
+          image: ${ocir_host}/${namespace}/games:frogger-${image_version}  # OCIR image location
           ports:
             - containerPort: 8000  # The port the game server listens on
 
@@ -187,9 +187,11 @@ spec:
     spec:
       nodeSelector:  # Constrains pods to nodes with this label
         nodegroup: game-nodes
+      imagePullSecrets:  # OCIR needs a login even inside the tenancy
+        - name: ocir-secret
       containers:
         - name: breakout  # Container name (visible in logs/dashboard)
-          image: ${account_id}.dkr.ecr.us-east-2.amazonaws.com/games:breakout-rc1  # ECR image location
+          image: ${ocir_host}/${namespace}/games:breakout-${image_version}  # OCIR image location
           ports:
             - containerPort: 8000  # The port the game server listens on
 

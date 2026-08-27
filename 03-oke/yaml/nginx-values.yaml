@@ -1,0 +1,24 @@
+# ==============================================================================
+# nginx-values.yaml — ingress controller service configuration
+# ------------------------------------------------------------------------------
+# The AWS version carried three aws-load-balancer-* annotations telling the ALB
+# controller what to build. OCI needs shape and bandwidth instead: an OCI load
+# balancer is provisioned at a fixed size, not scaled on demand, so the minimum
+# and maximum bandwidth are part of the request.
+#
+# 10 Mbps is the smallest flexible shape and is ample for this demo. Raise
+# lb-shape-max to give the load balancer more headroom under the stress test.
+# ==============================================================================
+controller:
+  service:
+    type: LoadBalancer
+    annotations:
+      oci.oraclecloud.com/load-balancer-type: "lb"
+      service.beta.kubernetes.io/oci-load-balancer-shape: "flexible"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-min: "10"
+      service.beta.kubernetes.io/oci-load-balancer-shape-flex-max: "100"
+
+  # Keep the controller off the game nodes so a busy game pod cannot starve
+  # the ingress path.
+  nodeSelector:
+    nodegroup: flask-nodes
