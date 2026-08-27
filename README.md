@@ -301,6 +301,8 @@ The order matters. The OCI Load Balancer is created by the in-cluster cloud cont
 | Symptom | Fix |
 |---|---|
 | Flask pod gets a 404 from NoSQL on every call | Workload identity is not matching. Check that the pod's service account, its namespace and the cluster OCID all match the policy in [03-oke/iam.tf](./03-oke/iam.tf). A mismatch resolves to no groups and reads as 404, not 403 |
+| Flask pod CrashLoopBackOff, "Must supply either a region or an endpoint" | The OKE workload identity signer carries no region, unlike a resource principal signer. `NosqlClient` needs `config={"region": ...}` — supplied from the `OCI_REGION` env var in the deployment |
+| Rebuilt image but the pods behave the same | The image tags are mutable, so `imagePullPolicy: Always` is required. Restart the deployment to force a pull: `kubectl rollout restart deployment/flask-app` |
 | Pods stuck in `ImagePullBackOff` | The `ocir-secret` is missing from that namespace, or the cached auth token in `~/.oci/ocir_token` was revoked |
 | Pods stuck in `Pending` | No node carries the `nodegroup` label the deployment selects on. Check `kubectl get nodes --show-labels` |
 | Ingress `ADDRESS` stays empty | The load balancer is still provisioning, or the `lb` subnet was not passed as `service_lb_subnet_ids` on the cluster |

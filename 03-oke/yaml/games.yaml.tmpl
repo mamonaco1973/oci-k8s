@@ -30,6 +30,7 @@ spec:
       containers:
         - name: tetris  # Container name (visible in logs/dashboard)
           image: ${ocir_host}/${namespace}/games:tetris-${image_version}  # OCIR image location
+          imagePullPolicy: Always  # mutable tag - see flask-app.yaml.tmpl
           ports:
             - containerPort: 8000  # The port the game server listens on
 
@@ -111,6 +112,7 @@ spec:
       containers:
         - name: frogger  # Container name (visible in logs/dashboard)
           image: ${ocir_host}/${namespace}/games:frogger-${image_version}  # OCIR image location
+          imagePullPolicy: Always  # mutable tag - see flask-app.yaml.tmpl
           ports:
             - containerPort: 8000  # The port the game server listens on
 
@@ -192,6 +194,7 @@ spec:
       containers:
         - name: breakout  # Container name (visible in logs/dashboard)
           image: ${ocir_host}/${namespace}/games:breakout-${image_version}  # OCIR image location
+          imagePullPolicy: Always  # mutable tag - see flask-app.yaml.tmpl
           ports:
             - containerPort: 8000  # The port the game server listens on
 

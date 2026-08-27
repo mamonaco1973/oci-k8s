@@ -32,6 +32,11 @@ spec:
           image: ${ocir_host}/${namespace}/flask-app:flask-app-${image_version}
                                                 # Pulled from OCIR
 
+          # The tag is mutable and apply.sh reuses it on every build. Without
+          # Always, a node that already has the tag cached keeps serving the
+          # old image and a rebuild silently does nothing.
+          imagePullPolicy: Always
+
           ports:
             - containerPort: 8000               # Expose port 8000 (Flask app default)
 

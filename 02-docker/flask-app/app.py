@@ -11,9 +11,13 @@ Authentication:
 
     It only works if all of the following line up: the cluster is an
     ENHANCED_CLUSTER, the pod runs as the service account named in the IAM
-    policy, and that policy names the same namespace and cluster OCID. A
-    mismatch in any one of them surfaces as a 404 from NoSQL rather than a
-    permission error, because the caller resolves to no groups at all.
+    policy, and that policy names the same namespace and cluster OCID.
+
+    THE SIGNER DOES NOT SUPPLY A REGION. A resource principal signer carries
+    one, so `NosqlClient(config={}, signer=...)` works on OCI Functions. The
+    workload identity signer does not, and the client fails to construct with
+    "Must supply either a region or an endpoint" — an error that says nothing
+    about workload identity at all. Hence OCI_REGION below.
 
 Storage:
     A NoSQL table with a single shard column, CandidateName, matching the
@@ -21,6 +25,7 @@ Storage:
 """
 
 import json
+import logging
 import os
 
 from flask import Flask, Response, request
@@ -29,22 +34,37 @@ from oci.auth.signers import get_oke_workload_identity_resource_principal_signer
 from oci.nosql import NosqlClient
 from oci.nosql.models import QueryDetails, UpdateRowDetails
 
-# Reported by /gtg?details=true so a caller can tell which pod answered. The
-# AWS version shelled out to `hostname -I`; inside a pod the IP is the useful
-# identifier and it is already in the environment on most images, but the shell
-# call is kept because it works regardless of the base image.
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+# Reported by /gtg?details=true so a caller can tell which pod answered.
 instance_id = os.popen("hostname -I").read().strip()
 
 table_name = os.environ.get("NOSQL_TABLE_NAME", "Candidates")
 compartment_id = os.environ["OCI_COMPARTMENT_ID"]
+region = os.environ["OCI_REGION"]
 
-# The signer refreshes its own token, so it is built once at import time and
-# reused for the life of the process.
-_signer = get_oke_workload_identity_resource_principal_signer()
+# Built on first use, not at import. AN AUTH PROBLEM MUST NOT BE A CRASH LOOP:
+# constructing the client at import meant any failure killed gunicorn before it
+# bound a port, so the pod never became ready, the probes never ran, and the
+# only visible symptom was a 503 from the ingress with the real error buried in
+# container logs. Deferring it keeps /gtg answering and turns a storage failure
+# into a 500 on the endpoint that actually needs storage.
+_nosql = None
 
-# NosqlClient wants a config dict even when a signer supplies the credentials;
-# an empty one is the documented way to say "everything comes from the signer".
-nosql = NosqlClient(config={}, signer=_signer)
+
+def get_nosql():
+    """Return the NoSQL client, constructing it on first use.
+
+    Returns:
+        A configured oci.nosql.NosqlClient.
+    """
+    global _nosql
+    if _nosql is None:
+        signer = get_oke_workload_identity_resource_principal_signer()
+        _nosql = NosqlClient(config={"region": region}, signer=signer)
+    return _nosql
+
 
 candidates_app = Flask(__name__)
 
@@ -58,6 +78,10 @@ def default():
 @candidates_app.route("/gtg", methods=["GET"])
 def gtg():
     """Report readiness, optionally with the answering pod's address.
+
+    Deliberately does not touch NoSQL. This is the liveness and readiness
+    probe, and tying it to a downstream dependency turns a storage outage into
+    a rolling restart of every pod.
 
     Returns:
         An empty 200, or a JSON body with the pod address when the request
@@ -80,7 +104,8 @@ def get_candidate(name):
         name: Value of the CandidateName shard column.
 
     Returns:
-        A JSON array of matching rows, or 404 when the name is not present.
+        A JSON array of matching rows, 404 when the name is not present, or
+        500 when the lookup itself failed.
     """
     try:
         # Bound variable, not string interpolation — the value arrives
@@ -93,18 +118,22 @@ def get_candidate(name):
             ),
             variables={"$name": name},
         )
-        rows = nosql.query(query_details=details).data.items
-
-        if not rows:
-            return "Not Found", 404
-
-        return Response(
-            json.dumps(rows),
-            status=200,
-            mimetype="application/json",
-        )
+        rows = get_nosql().query(query_details=details).data.items
     except Exception:
+        # An empty result is a 404; a failed query is not. Collapsing the two
+        # is what makes a workload identity misconfiguration look like missing
+        # data — the exact confusion this project's README warns about.
+        log.exception("Query failed for candidate %s", name)
+        return "Query failed", 500
+
+    if not rows:
         return "Not Found", 404
+
+    return Response(
+        json.dumps(rows),
+        status=200,
+        mimetype="application/json",
+    )
 
 
 @candidates_app.route("/candidate/<name>", methods=["POST"])
@@ -118,7 +147,7 @@ def post_candidate(name):
         JSON echoing the stored name, or 500 if the write failed.
     """
     try:
-        nosql.update_row(
+        get_nosql().update_row(
             table_name_or_id=table_name,
             update_row_details=UpdateRowDetails(
                 compartment_id=compartment_id,
@@ -126,6 +155,7 @@ def post_candidate(name):
             ),
         )
     except Exception:
+        log.exception("Write failed for candidate %s", name)
         return "Unable to update", 500
 
     return Response(
@@ -140,24 +170,25 @@ def get_candidates():
     """List every candidate.
 
     Returns:
-        A JSON array of all rows, or 404 when the table is empty. The empty
-        case returning 404 rather than an empty array is carried over from the
-        AWS version so the test script behaves identically.
+        A JSON array of all rows, 404 when the table is empty, or 500 when the
+        scan failed. The empty case returning 404 rather than an empty array is
+        carried over from the AWS version so the test script behaves the same.
     """
     try:
         details = QueryDetails(
             compartment_id=compartment_id,
             statement=f"SELECT * FROM {table_name}",
         )
-        rows = nosql.query(query_details=details).data.items
-
-        if not rows:
-            return "Not Found", 404
-
-        return Response(
-            json.dumps(rows),
-            status=200,
-            mimetype="application/json",
-        )
+        rows = get_nosql().query(query_details=details).data.items
     except Exception:
+        log.exception("Scan failed")
+        return "Query failed", 500
+
+    if not rows:
         return "Not Found", 404
+
+    return Response(
+        json.dumps(rows),
+        status=200,
+        mimetype="application/json",
+    )
