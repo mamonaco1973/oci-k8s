@@ -308,3 +308,4 @@ The order matters. The OCI Load Balancer is created by the in-cluster cloud cont
 | Autoscaler never adds nodes | The node pool OCID is not in the autoscaler values, or the worker node dynamic group did not exist when the nodes booted. An instance principal caches its group membership at boot — the nodes must be recycled after a group change |
 | `terraform destroy` fails on the subnet | A load balancer still exists. Delete the ingress controller's Service and wait for the balancer to disappear before retrying |
 | `oci ce cluster generate-token` not found | The OCI CLI is missing from PATH where Terraform runs |
+| `destroy.sh` fails with "No value for required variable" | You are on an older copy. Both scripts now source [oci-env.sh](./oci-env.sh) — Terraform needs the same variables on destroy as on apply |

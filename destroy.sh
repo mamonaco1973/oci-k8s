@@ -25,11 +25,14 @@
 # genuinely must succeed checks its own exit status.
 set -uo pipefail
 
-CONFIG_REGION=$(awk -F'=' '/^region[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config 2>/dev/null)
-REGION="${OCI_REGION:-${CONFIG_REGION}}"
-
-TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config 2>/dev/null)
-COMPARTMENT_ID="${OCI_COMPARTMENT_ID:-$TENANCY_OCID}"
+# ------------------------------------------------------------------------------
+# Shared derivation — exports TF_VAR_region, home_region, tenancy_ocid and
+# compartment_ocid. Terraform requires every declared variable to have a value
+# on DESTROY exactly as on apply, so skipping this fails with "No value for
+# required variable" before anything is deleted.
+# ------------------------------------------------------------------------------
+# shellcheck source=oci-env.sh
+source ./oci-env.sh
 
 # ==============================================================================
 # SECTION: Guards
@@ -80,6 +83,27 @@ fi
 # ==============================================================================
 # SECTION: Step 2 — Destroy the cluster phase
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 03-oke declares six variables the shared file does not cover. Destroy needs
+# values for all of them, but not CORRECT ones -- Terraform only has to parse
+# the configuration, and every resource it deletes is addressed by the OCID
+# already recorded in state. The subnet OCIDs are read back from phase 1, which
+# is still intact at this point; the OCIR token falls back to empty when the
+# cache is gone, because no image is pulled during a teardown.
+# ------------------------------------------------------------------------------
+if has_state 01-ocir; then
+  export TF_VAR_api_subnet_ocid=$(terraform -chdir=01-ocir output -raw api_subnet_ocid 2>/dev/null)
+  export TF_VAR_lb_subnet_ocid=$(terraform -chdir=01-ocir output -raw lb_subnet_ocid 2>/dev/null)
+  export TF_VAR_node_subnet_ocid=$(terraform -chdir=01-ocir output -raw node_subnet_ocid 2>/dev/null)
+fi
+
+export TF_VAR_api_subnet_ocid="${TF_VAR_api_subnet_ocid:-unused}"
+export TF_VAR_lb_subnet_ocid="${TF_VAR_lb_subnet_ocid:-unused}"
+export TF_VAR_node_subnet_ocid="${TF_VAR_node_subnet_ocid:-unused}"
+export TF_VAR_ocir_namespace="${NAMESPACE}"
+export TF_VAR_ocir_username="${OCIR_USERNAME}"
+export TF_VAR_ocir_token="$(cat "${HOME}/.oci/ocir_token" 2>/dev/null)"
 
 if has_state 03-oke; then
   cd 03-oke || { echo "ERROR: Cannot enter 03-oke."; exit 1; }

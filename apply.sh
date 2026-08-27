@@ -27,41 +27,16 @@ echo "NOTE: Running environment validation."
 # ------------------------------------------------------------------------------
 # Derive OCI identifiers
 # ------------------------------------------------------------------------------
-TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
-USER_OCID=$(awk -F'=' '/^user[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
-
-# Region follows the OCI CLI unless OCI_REGION overrides it. Nothing in this
-# project is region-specific -- unlike the Gen AI projects, which have to
-# run where the models are served.
-CONFIG_REGION=$(awk -F'=' '/^region[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
-REGION="${OCI_REGION:-${CONFIG_REGION}}"
-
-if [ -z "${REGION}" ]; then
-  echo "ERROR: No region in ~/.oci/config and OCI_REGION is not set."
-  exit 1
-fi
-COMPARTMENT_ID="${OCI_COMPARTMENT_ID:-$TENANCY_OCID}"
-
-HOME_REGION=$(oci iam region-subscription list \
-  --query "data[?\"is-home-region\"].\"region-name\" | [0]" --raw-output)
-NAMESPACE=$(oci os ns get --query 'data' --raw-output)
-
-# OCIR login is namespace/username, not an OCID. Federated users come back as
-# "oracleidentitycloudservice/email@domain", which is exactly what OCIR wants.
-USER_NAME=$(oci iam user get --user-id "${USER_OCID}" --query 'data.name' --raw-output)
-OCIR_USERNAME="${NAMESPACE}/${USER_NAME}"
-OCIR_HOST="${REGION}.ocir.io"
-IMAGE_VERSION="rc1"
+# Shared with destroy.sh so the two cannot drift — Terraform needs the same
+# variable set on destroy as on apply.
+# ------------------------------------------------------------------------------
+# shellcheck source=oci-env.sh
+source ./oci-env.sh
 
 echo "NOTE: Region      - ${REGION}"
 echo "NOTE: Home region - ${HOME_REGION}"
 echo "NOTE: Namespace   - ${NAMESPACE}"
 echo "NOTE: Compartment - ${COMPARTMENT_ID}"
-
-export TF_VAR_region="${REGION}"
-export TF_VAR_home_region="${HOME_REGION}"
-export TF_VAR_tenancy_ocid="${TENANCY_OCID}"
-export TF_VAR_compartment_ocid="${COMPARTMENT_ID}"
 
 # ------------------------------------------------------------------------------
 # OCIR auth token — created once, cached in ~/.oci/ocir_token
