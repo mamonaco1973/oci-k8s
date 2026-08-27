@@ -11,7 +11,7 @@ variable "region" {
   type        = string
   # Only used if a phase is applied by hand; apply.sh always exports
   # TF_VAR_region from the OCI CLI configuration.
-  default     = "us-ashburn-1"
+  default = "us-ashburn-1"
 }
 
 variable "home_region" {
@@ -45,9 +45,13 @@ variable "node_subnet_ocid" {
 }
 
 variable "kubernetes_version" {
-  description = "OKE Kubernetes version, including the leading v"
+  description = "OKE Kubernetes version including the leading v; empty selects the newest the region offers"
   type        = string
-  default     = "v1.33.1"
+
+  # Empty on purpose. A pinned version rots as soon as OKE moves on, and the
+  # failure is a 409 about worker node images rather than anything that names
+  # the version. See the version resolution in oke.tf.
+  default = ""
 }
 
 variable "node_shape" {

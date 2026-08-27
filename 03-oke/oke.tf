@@ -7,13 +7,31 @@
 # ==============================================================================
 
 # ==============================================================================
-# SECTION: Node image lookup
+# SECTION: Kubernetes version and node image
 # ------------------------------------------------------------------------------
 # The AWS build searched for a Canonical Ubuntu AMI by name pattern. OKE does
-# not work that way — worker images are published per Kubernetes version and
-# must be selected from the node pool options list, because an image built for
-# a different version will join the cluster and then fail to run kubelet.
+# not work that way — worker images are published per Kubernetes version, and a
+# node pool whose image version does not exactly equal the pool's declared
+# version is rejected outright with a 409.
+#
+# TWO TRAPS LIVE HERE.
+#
+# 1. THE VERSION MUST BE ONE THE REGION OFFERS. Pinning a plausible-looking
+#    version means the config rots the moment OKE moves on. By default the
+#    newest version the region advertises is used, so there is nothing to keep
+#    up to date. Set var.kubernetes_version to pin it deliberately.
+#
+# 2. THE IMAGE MATCH MUST BE ANCHORED. Image names read
+#    "...-OKE-<version>-<build>", so an unanchored match on 1.33.1 also matches
+#    1.33.10 — a real version, a real image, and a node pool that fails with
+#    "Kubernetes version does not match Kubernetes version of OKE worker node
+#    image". The trailing hyphen in the pattern is what prevents it.
 # ==============================================================================
+
+data "oci_containerengine_cluster_option" "oke" {
+  cluster_option_id = "all"
+  compartment_id    = var.compartment_ocid
+}
 
 data "oci_containerengine_node_pool_option" "oke" {
   node_pool_option_id = "all"
@@ -25,18 +43,34 @@ data "oci_identity_availability_domains" "ads" {
 }
 
 locals {
-  # Strip the leading v — image names carry the bare version number.
-  k8s_version_bare = replace(var.kubernetes_version, "v", "")
+  # Versions come back ascending, so the last entry is the newest.
+  available_versions = data.oci_containerengine_cluster_option.oke.kubernetes_versions
 
-  # Oracle Linux 8 platform image matching this exact Kubernetes version.
-  node_image_id = [
+  k8s_version = (
+    var.kubernetes_version != ""
+    ? var.kubernetes_version
+    : element(local.available_versions, length(local.available_versions) - 1)
+  )
+
+  # Strip the leading v — image names carry the bare version number.
+  k8s_version_bare = replace(local.k8s_version, "v", "")
+
+  # Oracle Linux 8 image for exactly this version. The trailing hyphen is the
+  # anchor described above; without it, 1.33.1 matches 1.33.10.
+  node_image_candidates = [
     for src in data.oci_containerengine_node_pool_option.oke.sources :
     src.image_id
     if length(regexall(
-      "Oracle-Linux-8.*OKE-${local.k8s_version_bare}",
+      "Oracle-Linux-8.*OKE-${local.k8s_version_bare}-",
       src.source_name
     )) > 0
-  ][0]
+  ]
+
+  node_image_id = (
+    length(local.node_image_candidates) > 0
+    ? local.node_image_candidates[0]
+    : null
+  )
 
   # Subnets are regional, so every availability domain is reachable from the
   # one node subnet. Spreading placement across all of them is free redundancy.
@@ -60,7 +94,7 @@ resource "oci_containerengine_cluster" "k8s" {
   compartment_id     = var.compartment_ocid
   name               = "flask-oke-cluster"
   vcn_id             = data.oci_core_subnet.node.vcn_id
-  kubernetes_version = var.kubernetes_version
+  kubernetes_version = local.k8s_version
   type               = "ENHANCED_CLUSTER"
 
   endpoint_config {
@@ -101,7 +135,7 @@ resource "oci_containerengine_node_pool" "flask_nodes" {
   cluster_id         = oci_containerengine_cluster.k8s.id
   compartment_id     = var.compartment_ocid
   name               = "flask-nodes"
-  kubernetes_version = var.kubernetes_version
+  kubernetes_version = local.k8s_version
   node_shape         = var.node_shape
 
   node_shape_config {
@@ -145,6 +179,13 @@ resource "oci_containerengine_node_pool" "flask_nodes" {
   # subsequent apply would drag the pool back to the size declared above.
   lifecycle {
     ignore_changes = [node_config_details[0].size]
+
+    # Fail with a sentence rather than an opaque 409 from the node pool API
+    # when no image matches the resolved version.
+    precondition {
+      condition     = local.node_image_id != null
+      error_message = "No Oracle Linux 8 OKE image found for Kubernetes ${local.k8s_version} in this region. Available versions: ${join(", ", local.available_versions)}."
+    }
   }
 }
 
@@ -158,7 +199,7 @@ resource "oci_containerengine_node_pool" "game_nodes" {
   cluster_id         = oci_containerengine_cluster.k8s.id
   compartment_id     = var.compartment_ocid
   name               = "game-nodes"
-  kubernetes_version = var.kubernetes_version
+  kubernetes_version = local.k8s_version
   node_shape         = var.node_shape
 
   node_shape_config {
@@ -195,4 +236,13 @@ resource "oci_containerengine_node_pool" "game_nodes" {
     oci_identity_dynamic_group.worker_nodes,
     oci_identity_policy.autoscaler,
   ]
+
+  lifecycle {
+    # Fail with a sentence rather than an opaque 409 from the node pool API
+    # when no image matches the resolved version.
+    precondition {
+      condition     = local.node_image_id != null
+      error_message = "No Oracle Linux 8 OKE image found for Kubernetes ${local.k8s_version} in this region. Available versions: ${join(", ", local.available_versions)}."
+    }
+  }
 }

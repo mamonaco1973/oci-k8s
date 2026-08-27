@@ -20,8 +20,11 @@ resource "oci_nosql_table" "candidates" {
     ")"
   ])
 
-  # Lab table — let it be reclaimed if the tenancy goes idle.
-  is_auto_reclaimable = true
+  # NOT a free-tier table. is_auto_reclaimable=true requests the always-free
+  # tier, which is not offered in every region — Ashburn rejects it outright
+  # with "Free tables are not available at this region", and the message does
+  # not mention the flag that caused it.
+  is_auto_reclaimable = false
 
   table_limits {
     max_read_units     = 50

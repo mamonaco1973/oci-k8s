@@ -308,4 +308,6 @@ The order matters. The OCI Load Balancer is created by the in-cluster cloud cont
 | Autoscaler never adds nodes | The node pool OCID is not in the autoscaler values, or the worker node dynamic group did not exist when the nodes booted. An instance principal caches its group membership at boot — the nodes must be recycled after a group change |
 | `terraform destroy` fails on the subnet | A load balancer still exists. Delete the ingress controller's Service and wait for the balancer to disappear before retrying |
 | `oci ce cluster generate-token` not found | The OCI CLI is missing from PATH where Terraform runs |
+| NoSQL: "Free tables are not available at this region" | `is_auto_reclaimable = true` requests the always-free tier, which not every region offers. It is `false` in [03-oke/nosql.tf](./03-oke/nosql.tf) |
+| Node pool 409: "Kubernetes version does not match ... worker node image" | The image match found a version whose number merely starts with yours — 1.33.1 matching 1.33.10. The pattern in [03-oke/oke.tf](./03-oke/oke.tf) is anchored with a trailing hyphen |
 | `destroy.sh` fails with "No value for required variable" | You are on an older copy. Both scripts now source [oci-env.sh](./oci-env.sh) — Terraform needs the same variables on destroy as on apply |
