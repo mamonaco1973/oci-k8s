@@ -102,7 +102,19 @@ The solution integrates with:
 
 All infrastructure is defined using **Terraform**; application deployment is performed with `kubectl`.
 
-> **Note:** the diagrams in `./diagrams/` still show the AWS topology and have not been redrawn for this port.
+### The traffic path
+
+One public address reaches everything. There is no load balancer controller in this picture because OKE does not need one.
+
+![oci-k8s](./diagrams/oci-k8s.drawio.png)
+
+### The network
+
+One VCN, three regional subnets split by role, and a control plane Oracle runs rather than you.
+
+![oci-k8s-infra](./diagrams/oci-k8s-infra.drawio.png)
+
+Both diagrams are generated, not hand-drawn — edit [diagrams/gen_diagrams.py](./diagrams/gen_diagrams.py) and re-run it, then export the PNGs with the draw.io CLI.
 
 ---
 

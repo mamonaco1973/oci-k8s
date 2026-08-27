@@ -212,6 +212,30 @@ kubectl apply -f flask-app.yaml
 echo "NOTE: Deploying the game containers."
 kubectl apply -f games.yaml
 
+# ------------------------------------------------------------------------------
+# Force a rollout so a rebuilt image is actually picked up
+# ------------------------------------------------------------------------------
+# THE TAGS ARE MUTABLE. Every build pushes the same flask-app-rc1 and
+# <game>-rc1, so on a re-run the manifests are byte-identical to what is
+# already applied and `kubectl apply` is a no-op. No new pod is created, and
+# imagePullPolicy: Always never gets a chance to fire -- the freshly pushed
+# image sits in OCIR while the cluster keeps running the old one, and this
+# script reports success having deployed nothing.
+#
+# `rollout restart` stamps the pod template, which forces new pods, which pull.
+# On a first deploy this costs one extra rollout of pods that were seconds old;
+# that is worth paying to make the rebuild path honest.
+# ------------------------------------------------------------------------------
+echo "NOTE: Rolling the deployments to pick up freshly built images."
+kubectl rollout restart deployment/flask-app
+kubectl rollout restart deployment/tetris deployment/breakout deployment/frogger -n games
+
+echo "NOTE: Waiting for the rollouts to complete."
+kubectl rollout status deployment/flask-app --timeout=300s
+for game in tetris breakout frogger; do
+  kubectl rollout status "deployment/${game}" -n games --timeout=300s
+done
+
 echo ""
 echo "NOTE: Validating the deployment."
 ./validate.sh
