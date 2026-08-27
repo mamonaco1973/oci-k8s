@@ -82,7 +82,8 @@ Only the flask pool is registered, on purpose. The game pool never scales.
 
 ## Architecture
 
-The solution is a fully managed **OKE cluster** in the `us-chicago-1` region.
+The solution is a fully managed **OKE cluster**, deployed to whichever region
+your OCI CLI is configured for. Nothing in it is region-specific.
 
 It includes:
 
@@ -151,7 +152,7 @@ No environment variables are required — everything is derived from `~/.oci/con
 | Variable | Default |
 |---|---|
 | `OCI_COMPARTMENT_ID` | tenancy root |
-| `OCI_REGION` | `us-chicago-1` |
+| `OCI_REGION` | the `region` in `~/.oci/config` |
 
 On the first run the script creates an **OCIR auth token** and caches it in `~/.oci/ocir_token`. A token is readable only at creation time, so it cannot be recovered later — delete the file to force a new one. OCI allows two per user, so an old token may need removing in the Console first.
 

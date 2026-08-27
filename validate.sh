@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-REGION="${OCI_REGION:-us-chicago-1}"
+CONFIG_REGION=$(awk -F'=' '/^region[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+REGION="${OCI_REGION:-${CONFIG_REGION}}"
 CLUSTER_NAME="flask-oke-cluster"
 
 # ------------------------------------------------------------------------------

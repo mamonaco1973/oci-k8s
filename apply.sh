@@ -13,7 +13,7 @@
 #
 # Optional:
 #   OCI_COMPARTMENT_ID  Defaults to the tenancy root when unset
-#   OCI_REGION          Defaults to us-chicago-1
+#   OCI_REGION          Defaults to the region in ~/.oci/config
 # ==============================================================================
 
 set -euo pipefail
@@ -30,7 +30,16 @@ echo "NOTE: Running environment validation."
 TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
 USER_OCID=$(awk -F'=' '/^user[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
 
-REGION="${OCI_REGION:-us-chicago-1}"
+# Region follows the OCI CLI unless OCI_REGION overrides it. Nothing in this
+# project is region-specific -- unlike the Gen AI projects, which have to
+# run where the models are served.
+CONFIG_REGION=$(awk -F'=' '/^region[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+REGION="${OCI_REGION:-${CONFIG_REGION}}"
+
+if [ -z "${REGION}" ]; then
+  echo "ERROR: No region in ~/.oci/config and OCI_REGION is not set."
+  exit 1
+fi
 COMPARTMENT_ID="${OCI_COMPARTMENT_ID:-$TENANCY_OCID}"
 
 HOME_REGION=$(oci iam region-subscription list \
@@ -64,8 +73,9 @@ export TF_VAR_compartment_ocid="${COMPARTMENT_ID}"
 TOKEN_FILE="${HOME}/.oci/ocir_token"
 
 if [ -f "${TOKEN_FILE}" ] && [ -s "${TOKEN_FILE}" ]; then
-  echo "NOTE: Using cached OCIR token."
+  echo "NOTE: Using cached OCIR token from ${TOKEN_FILE}"
   OCIR_TOKEN=$(cat "${TOKEN_FILE}")
+  TOKEN_IS_NEW="false"
 else
   echo "NOTE: Creating an OCIR auth token."
   OCIR_TOKEN=$(oci iam auth-token create \
@@ -74,6 +84,7 @@ else
     --query 'data.token' --raw-output)
   echo "${OCIR_TOKEN}" > "${TOKEN_FILE}"
   chmod 600 "${TOKEN_FILE}"
+  TOKEN_IS_NEW="true"
 fi
 
 # ------------------------------------------------------------------------------
@@ -106,9 +117,48 @@ cd ..
 # auth token is the password for a plain `docker login`.
 # ==============================================================================
 cd 02-docker
+# ------------------------------------------------------------------------------
+# OCIR login
+# ------------------------------------------------------------------------------
+# A NEWLY CREATED AUTH TOKEN IS NOT USABLE IMMEDIATELY. IAM takes one to two
+# minutes to propagate it, and until it has, OCIR answers a perfectly correct
+# token with "unknown: Unauthorized" -- indistinguishable from a wrong one. A
+# single-shot login therefore fails on the first run of a fresh tenancy and
+# looks like a credential bug. So poll.
+#
+# A CACHED token that fails is the opposite problem: it will never start
+# working, so say so immediately rather than after five minutes of retries.
+# ------------------------------------------------------------------------------
 echo "NOTE: Logging in to OCIR at ${OCIR_HOST}."
-echo "${OCIR_TOKEN}" | docker login "${OCIR_HOST}" \
-  --username "${OCIR_USERNAME}" --password-stdin
+
+LOGIN_TIMEOUT=300
+LOGIN_INTERVAL=15
+elapsed=0
+
+until printf '%s' "${OCIR_TOKEN}" | docker login "${OCIR_HOST}"         --username "${OCIR_USERNAME}" --password-stdin 2>/dev/null; do
+
+  if [ "${TOKEN_IS_NEW}" = "false" ]; then
+    echo "ERROR: OCIR rejected the cached token in ${TOKEN_FILE}."
+    echo "       It was most likely revoked, or belongs to a different user."
+    echo "       Delete it and re-run:  rm ${TOKEN_FILE}"
+    echo "       OCI allows two auth tokens per user, so an old one may need"
+    echo "       deleting first under Identity > Users > Auth Tokens."
+    exit 1
+  fi
+
+  if [ "${elapsed}" -ge "${LOGIN_TIMEOUT}" ]; then
+    echo "ERROR: OCIR login still failing after ${LOGIN_TIMEOUT}s."
+    echo "       Host: ${OCIR_HOST}"
+    echo "       User: ${OCIR_USERNAME}"
+    exit 1
+  fi
+
+  echo "NOTE: OCIR not ready yet (token propagating) - retrying in ${LOGIN_INTERVAL}s (${elapsed}/${LOGIN_TIMEOUT}s)."
+  sleep "${LOGIN_INTERVAL}"
+  elapsed=$(( elapsed + LOGIN_INTERVAL ))
+done
+
+echo "NOTE: OCIR login succeeded."
 
 build_and_push() {
   local dir="$1" repo="$2" tag="$3"

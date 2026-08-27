@@ -9,7 +9,9 @@
 variable "region" {
   description = "Region the cluster runs in"
   type        = string
-  default     = "us-chicago-1"
+  # Only used if a phase is applied by hand; apply.sh always exports
+  # TF_VAR_region from the OCI CLI configuration.
+  default     = "us-ashburn-1"
 }
 
 variable "home_region" {
