@@ -88,6 +88,10 @@ ICONS = {
                '<polyline points="16 7 22 7 22 13"/>',
     "swap": '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/>'
             '<path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
+    "share": '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/>'
+             '<circle cx="18" cy="19" r="3"/>'
+             '<line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/>'
+             '<line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
     "cpu": '<rect width="16" height="16" x="4" y="4" rx="2"/>'
            '<rect width="6" height="6" x="9" y="9" rx="1"/>'
            '<path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/>'
@@ -164,8 +168,9 @@ class Canvas:
         )
         label = '<b style="font-size:22px">%s</b>%s%s' % (title, note, body)
         self.cells.append(
-            '<mxCell id="%s_t" value="%s" style="text;html=1;align=left;'
-            'verticalAlign=middle;fillColor=none;strokeColor=none;fontColor=%s;" '
+            '<mxCell id="%s_t" value="%s" style="text;html=1;whiteSpace=wrap;'
+            'align=left;verticalAlign=middle;fillColor=none;strokeColor=none;'
+            'fontColor=%s;" '
             'vertex="1" parent="1"><mxGeometry x="%d" y="%d" width="%d" '
             'height="%d" as="geometry"/></mxCell>'
             % (cid, esc(label), NAVY, x + 88, y + 10, w - 104, h - 20)
@@ -276,7 +281,7 @@ def build_arch():
 
     c.card("lb", 310, 460, 310, 150, BLUE, "route",
            "OCI Load Balancer",
-           ["created by the cluster itself", "k8s-lb-subnet · flexible 10–100"])
+           ["created by the cluster itself", "k8s-lb-subnet · flexible shape"])
 
     c.container("cluster", 680, 95, 800, 900, NAVY,
                 "OKE Cluster  —  flask-oke-cluster  ·  ENHANCED", fsize=20,
@@ -504,9 +509,9 @@ def build_control_plane():
     c.edge("e_kubectl", "kubectl", "apiserver", ":6443", PURPLE,
            "1", "0.5", "0", "0.5")
     c.edge("e_state", "etcd", "apiserver", "state", PURPLE,
-           "0.5", "0", "0.25", "1", dash=True)
+           "0.5", "0", "0.1", "1", dash=True, lpos="-0.4")
     c.edge("e_kubelet", "apiserver", "kubelet", "watch · exec · logs", BLUE,
-           "0.25", "1", "0.5", "0", dash=True, lpos="0.6")
+           "0.5", "1", "0.5", "0", dash=True, lpos="0.6")
 
     c.write(os.path.join(HERE, "oci-k8s-control-plane.drawio"))
 

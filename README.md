@@ -114,6 +114,12 @@ One VCN, three regional subnets split by role, and a control plane Oracle runs r
 
 ![oci-k8s-infra](./diagrams/oci-k8s-infra.drawio.png)
 
+### The control plane
+
+What "managed" actually means: every component in the top frame exists and runs, and none of them is a node you provision, patch or pay for by the hour. The `cloud-controller-manager` is the reason no load balancer controller appears in the add-ons.
+
+![oci-k8s-control-plane](./diagrams/oci-k8s-control-plane.drawio.png)
+
 Both diagrams are generated, not hand-drawn — edit [diagrams/gen_diagrams.py](./diagrams/gen_diagrams.py) and re-run it, then export the PNGs with the draw.io CLI.
 
 ---
