@@ -14,7 +14,7 @@
 # node pool whose image version does not exactly equal the pool's declared
 # version is rejected outright with a 409.
 #
-# TWO TRAPS LIVE HERE.
+# THREE TRAPS LIVE HERE.
 #
 # 1. THE VERSION MUST BE ONE THE REGION OFFERS. Pinning a plausible-looking
 #    version means the config rots the moment OKE moves on. By default the
@@ -26,6 +26,13 @@
 #    1.33.10 — a real version, a real image, and a node pool that fails with
 #    "Kubernetes version does not match Kubernetes version of OKE worker node
 #    image". The trailing hyphen in the pattern is what prevents it.
+#
+# 3. THE ARCHITECTURE MUST MATCH THE SHAPE. The same data source returns x86_64
+#    and aarch64 images, distinguished only by "aarch64" appearing in the name.
+#    An ARM image on an AMD shape passes plan and is rejected by the API with
+#    "Node shape and image are not compatible" — which names the shape, not the
+#    image, and sends you off to check the shape. The architecture is derived
+#    from var.node_shape below so the two cannot disagree.
 # ==============================================================================
 
 data "oci_containerengine_cluster_option" "oke" {
@@ -55,21 +62,49 @@ locals {
   # Strip the leading v — image names carry the bare version number.
   k8s_version_bare = replace(local.k8s_version, "v", "")
 
-  # Oracle Linux 8 image for exactly this version. The trailing hyphen is the
-  # anchor described above; without it, 1.33.1 matches 1.33.10.
-  node_image_candidates = [
+  # Ampere shapes are aarch64; everything else here is x86_64. Derived from the
+  # shape name so the image follows whatever var.node_shape is set to, rather
+  # than the two having to be kept in step by hand.
+  is_arm_shape = length(regexall("\\.A[0-9]+\\.", var.node_shape)) > 0
+
+  node_image_candidates = sort([
     for src in data.oci_containerengine_node_pool_option.oke.sources :
-    src.image_id
-    if length(regexall(
-      "Oracle-Linux-8.*OKE-${local.k8s_version_bare}-",
-      src.source_name
-    )) > 0
-  ]
+    src.source_name
+    if(
+      # Exactly this Kubernetes version. The trailing hyphen is the anchor
+      # described above; without it, 1.33.1 also matches 1.33.10.
+      length(regexall("OKE-${local.k8s_version_bare}-", src.source_name)) > 0
+
+      # Plain Oracle Linux 8, not a GPU build.
+      && length(regexall("Oracle-Linux-8", src.source_name)) > 0
+      && length(regexall("GPU", src.source_name)) == 0
+
+      # Matching architecture. Both are returned by the same data source, and
+      # picking the wrong one is accepted at plan time and rejected by the API
+      # with "Node shape and image are not compatible" — a message that names
+      # the shape rather than the image.
+      && (
+        local.is_arm_shape
+        ? length(regexall("aarch64", src.source_name)) > 0
+        : length(regexall("aarch64", src.source_name)) == 0
+      )
+    )
+  ])
+
+  # Names embed a build date, so sorted ascending the last entry is the newest.
+  node_image_name = (
+    length(local.node_image_candidates) > 0
+    ? element(local.node_image_candidates, length(local.node_image_candidates) - 1)
+    : null
+  )
 
   node_image_id = (
-    length(local.node_image_candidates) > 0
-    ? local.node_image_candidates[0]
-    : null
+    local.node_image_name == null
+    ? null
+    : [
+      for src in data.oci_containerengine_node_pool_option.oke.sources :
+      src.image_id if src.source_name == local.node_image_name
+    ][0]
   )
 
   # Subnets are regional, so every availability domain is reachable from the
@@ -184,7 +219,7 @@ resource "oci_containerengine_node_pool" "flask_nodes" {
     # when no image matches the resolved version.
     precondition {
       condition     = local.node_image_id != null
-      error_message = "No Oracle Linux 8 OKE image found for Kubernetes ${local.k8s_version} in this region. Available versions: ${join(", ", local.available_versions)}."
+      error_message = "No Oracle Linux 8 ${local.is_arm_shape ? "aarch64" : "x86_64"} OKE image found for Kubernetes ${local.k8s_version} in this region. Available versions: ${join(", ", local.available_versions)}."
     }
   }
 }
@@ -242,7 +277,7 @@ resource "oci_containerengine_node_pool" "game_nodes" {
     # when no image matches the resolved version.
     precondition {
       condition     = local.node_image_id != null
-      error_message = "No Oracle Linux 8 OKE image found for Kubernetes ${local.k8s_version} in this region. Available versions: ${join(", ", local.available_versions)}."
+      error_message = "No Oracle Linux 8 ${local.is_arm_shape ? "aarch64" : "x86_64"} OKE image found for Kubernetes ${local.k8s_version} in this region. Available versions: ${join(", ", local.available_versions)}."
     }
   }
 }

@@ -310,4 +310,5 @@ The order matters. The OCI Load Balancer is created by the in-cluster cloud cont
 | `oci ce cluster generate-token` not found | The OCI CLI is missing from PATH where Terraform runs |
 | NoSQL: "Free tables are not available at this region" | `is_auto_reclaimable = true` requests the always-free tier, which not every region offers. It is `false` in [03-oke/nosql.tf](./03-oke/nosql.tf) |
 | Node pool 409: "Kubernetes version does not match ... worker node image" | The image match found a version whose number merely starts with yours — 1.33.1 matching 1.33.10. The pattern in [03-oke/oke.tf](./03-oke/oke.tf) is anchored with a trailing hyphen |
+| Node pool 400: "Node shape and image are not compatible" | An aarch64 image was selected for an x86 shape. The node pool options data source returns both architectures; the filter in [03-oke/oke.tf](./03-oke/oke.tf) derives the right one from `var.node_shape` |
 | `destroy.sh` fails with "No value for required variable" | You are on an older copy. Both scripts now source [oci-env.sh](./oci-env.sh) — Terraform needs the same variables on destroy as on apply |
