@@ -1,0 +1,32 @@
+# =============================================================
+# Cluster Autoscaler Configuration (values.yaml override)
+# Used with Helm to deploy the AWS Cluster Autoscaler
+# =============================================================
+
+autoDiscovery:
+  clusterName: ${cluster_name}  # Dynamically inject the name of the EKS cluster
+                                # Enables the autoscaler to discover Auto Scaling Groups (ASGs)
+                                # based on specific AWS EC2 tags tied to this cluster
+
+awsRegion: us-east-2            # AWS region where the EKS cluster and ASGs reside
+                                # Must match the region of your ASG and EKS control plane
+
+rbac:
+  serviceAccount:
+    create: false               # Do NOT create a new service account (already pre-created externally)
+    name: cluster-autoscaler    # Use an existing service account with the correct IAM role attached
+                                # Required for IRSA (IAM Roles for Service Accounts) to work
+
+extraArgs:
+  balance-similar-node-groups: "true"
+  skip-nodes-with-system-pods: "false"
+  expander: least-waste
+  node-group-auto-discovery: asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/${cluster_name}
+
+  # 🔽 Scale-down behavior tuning
+  scale-down-enabled: "true"
+  scale-down-unneeded-time: "1m"              # Time a node must be unneeded before it's eligible for scale down
+  scale-down-delay-after-delete: "1m"         # Delay after pod deletion before scale-down is triggered
+  scale-down-delay-after-failure: "1m"        # Delay after scale-down failure before retry
+  scale-down-utilization-threshold: "0.5"     # Nodes with utilization below this are considered unneeded
+  scale-down-delay-after-add: 1m

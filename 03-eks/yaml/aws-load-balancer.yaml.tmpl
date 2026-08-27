@@ -1,0 +1,22 @@
+# ==================================================================
+# AWS Load Balancer Controller Configuration (values.yaml override)
+# Used when installing via Helm in an Amazon EKS environment
+# ==================================================================
+
+clusterName: ${cluster_name}  # Inject the name of your EKS cluster here
+                              # The controller needs this to register with the Kubernetes API
+                              # and interact with AWS resources (like ALBs/NLBs) correctly
+
+serviceAccount:
+  name: aws-load-balancer-controller
+  # Name of the Kubernetes service account that the controller will use
+  # This must match the service account name referenced in the Deployment
+  # The service account must exist in the correct namespace (typically `kube-system`)
+
+  annotations:
+    eks.amazonaws.com/role-arn: ${role_arn}
+    # This annotation enables IRSA (IAM Roles for Service Accounts)
+    # It binds the service account to a specific IAM role with permissions to:
+    # - Manage Elastic Load Balancers (ALBs/NLBs)
+    # - Modify Target Groups, Listeners, Security Groups, etc.
+    # The `${role_arn}` should be a valid IAM role ARN that has the AWS Load Balancer Controller policy attached

@@ -1,0 +1,41 @@
+# ==========================================================
+# Kubernetes Deployment: CPU Stress Test Workload
+# ==========================================================
+
+apiVersion: apps/v1         # Use the apps/v1 API group for deploying workloads (standard for Deployments)
+kind: Deployment            # Declare this resource as a Deployment object (manages Pods and ReplicaSets)
+
+metadata:
+  name: stress-test         # Name of the Deployment (used to identify and manage it within the namespace)
+
+spec:
+  replicas: 4               # Number of pod replicas to run simultaneously (simulates load with 4 stress containers)
+
+  selector:
+    matchLabels:
+      app: stress           # Select Pods with the label `app=stress` to be managed by this Deployment
+
+  template:
+    metadata:
+      labels:
+        app: stress         # Apply the `app=stress` label to Pods so they match the Deployment selector
+
+    spec:
+      nodeSelector:
+        nodegroup: flask-nodes            # <-- Only schedule on nodes labeled with this key/value
+
+      containers:
+        - name: stress                    # Name of the container inside the Pod
+          image: vish/stress              # Docker image to use — `vish/stress` generates synthetic CPU load
+          args:
+            - -cpus                       # CLI argument to stress tool: number of CPUs to consume
+            - "2"                         # Consume 2 CPUs per container (this will simulate high CPU usage)
+
+          resources:
+            requests:
+              cpu: "1000m"                # Minimum CPU guaranteed to each container: 1000 millicores (1 full core)
+              memory: "256Mi"             # Minimum memory guaranteed to each container: 256 MiB
+
+            limits:
+              cpu: "2000m"                # Maximum CPU the container can consume: 2000 millicores (2 full cores)
+              memory: "512Mi"             # Maximum memory the container can use: 512 MiB

@@ -1,0 +1,7 @@
+# nginx-values.yaml
+controller:
+  service:
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+      service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true
+      service.beta.kubernetes.io/aws-load-balancer-name: nginx-ingress-lb
